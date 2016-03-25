@@ -1,3 +1,6 @@
+gom "github.com/rs/xhandler"
+gom "github.com/rs/xmux"
 gom "golang.org/x/net/context"
-gom "github.com/pilu/fresh"
-gom "github.com/go-zoo/bone"
+gom "github.com/jmoiron/sqlx"
+gom "github.com/lib/pq"
+gom "github.com/achiku/wbs"
