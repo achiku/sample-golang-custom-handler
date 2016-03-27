@@ -64,36 +64,6 @@ func (ap *App) recoverMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(fn)
 }
 
-func (ap *App) transactionMiddleware() func(next xhandler.HandlerC) xhandler.HandlerC {
-	return func(next xhandler.HandlerC) xhandler.HandlerC {
-		fn := func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-			tx, err := ap.DB.Begin()
-			if err != nil {
-				log.Fatal(err)
-			}
-			ctx = context.WithValue(ctx, ctxTxKey, tx)
-			log.Println(w.Header())
-			next.ServeHTTPC(ctx, w, r)
-			w.Header().Set("Request-id", "Request ids!")
-			log.Println(w.Header())
-			tx.Commit()
-		}
-		return xhandler.HandlerFuncC(fn)
-	}
-}
-
-func (ap *App) jsonResponseMiddleware(next http.Handler) http.Handler {
-	fn := func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-type", "application/json")
-		next.ServeHTTP(w, r)
-	}
-	return http.HandlerFunc(fn)
-}
-
-func getTx(ctx context.Context) *sql.Tx {
-	return ctx.Value(ctxTxKey).(*sql.Tx)
-}
-
 // NewApp return application
 func NewApp() (*App, error) {
 	cfg := AppConfig{
@@ -117,53 +87,86 @@ func NewApp() (*App, error) {
 	return app, nil
 }
 
-// HandlerResult struct
-type HandlerResult struct {
-	StatusCode int
-	Message    string
-	Error      error
-}
-
 // EchoApp ping if server alive
 type EchoApp struct {
 	*App
 	Name string
 }
 
-func (ap *App) sendSimpleErrorMessage(w http.ResponseWriter, msg string) {
-	res := map[string]string{"message": msg}
-	w.WriteHeader(http.StatusInternalServerError)
-	json.NewEncoder(w).Encode(res)
+// AppHandlerC app handler
+type AppHandlerC func(context.Context, http.ResponseWriter, *http.Request) (int, error)
+
+// ServeHTTPC serve http with context
+func (ah AppHandlerC) ServeHTTPC(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	status, err := ah(ctx, w, r)
+	if err != nil {
+		http.Error(w, err.Error(), status)
+	}
 }
 
-func (ap *App) sendSimpleMessage(w http.ResponseWriter, msg string) {
-	res := map[string]string{"message": msg}
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(res)
+// TransactionHandlerC app handler
+type TransactionHandlerC struct {
+	*App
+	H func(context.Context, http.ResponseWriter, *http.Request) (int, error)
+}
+
+// ServeHTTPC serve http with context
+func (ah TransactionHandlerC) ServeHTTPC(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	tx, err := ah.App.DB.Begin()
+	defer tx.Rollback()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+	ctx = context.WithValue(ctx, ctxTxKey, tx)
+	status, err := ah.H(ctx, w, r)
+	if err != nil {
+		http.Error(w, err.Error(), status)
+	}
+}
+
+func getTx(ctx context.Context) *sql.Tx {
+	return ctx.Value(ctxTxKey).(*sql.Tx)
 }
 
 // EchoServer ping server
-func (ap *EchoApp) EchoServer(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-	msg := fmt.Sprintf("hello, server!")
-	ap.sendSimpleMessage(w, msg)
-	return
+func (ap *EchoApp) EchoServer(ctx context.Context, w http.ResponseWriter, r *http.Request) (int, error) {
+	fmt.Fprintf(w, "hello, server!")
+	return http.StatusOK, nil
 }
 
 // EchoDatabase ping server and database
-func (ap *EchoApp) EchoDatabase(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+func (ap *EchoApp) EchoDatabase(ctx context.Context, w http.ResponseWriter, r *http.Request) (int, error) {
 	tx := getTx(ctx)
 	var t time.Time
 	err := tx.QueryRow("SELECT now()").Scan(&t)
 	if err != nil {
-		ap.sendSimpleErrorMessage(w, "failed to access db")
-		return
+		return http.StatusInternalServerError, err
 	}
 	msg := fmt.Sprintf("hello, database! at %s", t)
-	w.Header().Set("EchoDatabase", "yes")
-	w.WriteHeader(http.StatusOK)
-	log.Println(w.Header())
-	ap.sendSimpleMessage(w, msg)
+	fmt.Fprintf(w, msg)
+	return http.StatusOK, nil
+}
+
+func helloctx(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	fmt.Fprintf(w, "hello, world!")
 	return
+}
+
+func helloret(ctx context.Context, w http.ResponseWriter, r *http.Request) (int, error) {
+	fmt.Fprintf(w, "hello, world!")
+	return http.StatusOK, nil
+}
+
+func hellotran(ctx context.Context, w http.ResponseWriter, r *http.Request) (int, error) {
+	tx := getTx(ctx)
+	var t time.Time
+	err := tx.QueryRow("SELECT now()").Scan(&t)
+	if err != nil {
+		return http.StatusInternalServerError, err
+	}
+	msg := fmt.Sprintf("hello, database! at %s", t)
+	fmt.Fprintf(w, msg)
+	return http.StatusOK, nil
 }
 
 func main() {
@@ -175,15 +178,16 @@ func main() {
 	c := xhandler.Chain{}
 	c.Use(app.recoverMiddleware)
 	c.Use(app.loggingMiddleware)
-	c.Use(app.jsonResponseMiddleware)
-	c.UseC(app.transactionMiddleware())
 
 	mux := xmux.New()
 	api := mux.NewGroup("/api")
 
 	echoApp := EchoApp{App: app, Name: "echo"}
-	api.GET("/echo/server", xhandler.HandlerFuncC(echoApp.EchoServer))
-	api.GET("/echo/database", xhandler.HandlerFuncC(echoApp.EchoDatabase))
+	api.GET("/echo/server", AppHandlerC(echoApp.EchoServer))
+	api.GET("/echo/database", TransactionHandlerC{App: app, H: echoApp.EchoDatabase})
+	api.GET("/hello/context1", xhandler.HandlerFuncC(helloctx))
+	api.GET("/hello/context2", AppHandlerC(helloret))
+	api.GET("/hello/context3", TransactionHandlerC{App: app, H: hellotran})
 
 	rootCtx := context.Background()
 	if err := http.ListenAndServe(":"+app.Config.ServerPort, c.HandlerCtx(rootCtx, mux)); err != nil {
