@@ -93,6 +93,12 @@ type EchoApp struct {
 	Name string
 }
 
+// DBApp ping if server alive
+type DBApp struct {
+	*App
+	Name string
+}
+
 // AppHandlerC app handler
 type AppHandlerC func(context.Context, http.ResponseWriter, *http.Request) (int, error)
 
@@ -169,6 +175,26 @@ func hellotran(ctx context.Context, w http.ResponseWriter, r *http.Request) (int
 	return http.StatusOK, nil
 }
 
+func tranSelect(ctx context.Context, w http.ResponseWriter, r *http.Request) (int, error) {
+	tx := getTx(ctx)
+	var t time.Time
+	err := tx.QueryRow("SELECT now()").Scan(&t)
+	if err != nil {
+		return http.StatusInternalServerError, err
+	}
+	fmt.Fprintf(w, "hello, from database at %s !", t)
+	return http.StatusOK, nil
+}
+
+func (app *DBApp) notranSelect(ctx context.Context, w http.ResponseWriter, r *http.Request) (int, error) {
+	var t time.Time
+	if err := app.DB.QueryRow(`SELECT now()`).Scan(&t); err != nil {
+		return http.StatusInternalServerError, err
+	}
+	fmt.Fprintf(w, "hello, from database at %s !", t)
+	return http.StatusOK, nil
+}
+
 func main() {
 	app, err := NewApp()
 	if err != nil {
@@ -183,11 +209,14 @@ func main() {
 	api := mux.NewGroup("/api")
 
 	echoApp := EchoApp{App: app, Name: "echo"}
+	dbApp := DBApp{App: app, Name: "db"}
 	api.GET("/echo/server", AppHandlerC(echoApp.EchoServer))
 	api.GET("/echo/database", TransactionHandlerC{App: app, H: echoApp.EchoDatabase})
 	api.GET("/hello/context1", xhandler.HandlerFuncC(helloctx))
 	api.GET("/hello/context2", AppHandlerC(helloret))
 	api.GET("/hello/context3", TransactionHandlerC{App: app, H: hellotran})
+	api.GET("/select/tran", TransactionHandlerC{App: app, H: tranSelect})
+	api.GET("/select/notran", AppHandlerC(dbApp.notranSelect))
 
 	rootCtx := context.Background()
 	if err := http.ListenAndServe(":"+app.Config.ServerPort, c.HandlerCtx(rootCtx, mux)); err != nil {
