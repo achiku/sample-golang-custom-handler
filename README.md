@@ -2,6 +2,11 @@
 Sample custom handler
 
 
+
+- Mac OS X 10.11.2
+- 4 Core: 1.8 GHz Intel Core i7
+- 4 GB 1333 MHz DDR3
+
 ###### simple select with begin/commit
 
 ```
